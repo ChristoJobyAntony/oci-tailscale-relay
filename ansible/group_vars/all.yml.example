@@ -1,0 +1,12 @@
+# Copy this file to ansible/group_vars/all.yml and store the real key safely.
+# Consider using Ansible Vault for this file.
+
+tailscale_auth_key: "tskey-auth-REPLACE_ME"
+tailscale_hostname: "oci-ts-relay-01"
+tailscale_enable_ssh: true
+
+tailscale_mode: "peer-relay"   # peer-relay | exit-node | peer-relay-exit-node | plain
+relay_udp_port: 40000
+
+tailscale_tags:
+  - "tag:peer-relay"

@@ -1,0 +1,49 @@
+// Example snippets for your tailnet policy file.
+// Merge these into your existing policy rather than replacing it wholesale.
+
+{
+  // Example for a Peer Relay node
+  "tagOwners": {
+    "tag:peer-relay": ["group:netadmin"]
+  },
+
+  "grants": [
+    {
+      // Only these devices are allowed to allocate relay bindings on the peer relay.
+      // Do not use "*" here unless you genuinely want the whole tailnet to try using it.
+      "src": ["tag:branch-office", "tag:corp-nat"],
+      "dst": ["tag:peer-relay"],
+      "app": {
+        "tailscale.com/cap/relay": []
+      }
+    },
+    {
+      // Optional: let your admins reach the relay host itself over Tailscale for SSH, monitoring, etc.
+      "src": ["group:netadmin"],
+      "dst": ["tag:peer-relay"],
+      "ip": ["*"]
+    }
+  ]
+}
+
+{
+  // Example for an Exit Node
+  "tagOwners": {
+    "tag:exit-node": ["group:netadmin"]
+  },
+
+  "grants": [
+    {
+      // Devices with access to autogroup:internet can use exit nodes.
+      "src": ["group:employees"],
+      "dst": ["autogroup:internet"],
+      "ip": ["*"]
+    },
+    {
+      // Optional: allow admins to reach the exit node host itself over Tailscale.
+      "src": ["group:netadmin"],
+      "dst": ["tag:exit-node"],
+      "ip": ["*"]
+    }
+  ]
+}

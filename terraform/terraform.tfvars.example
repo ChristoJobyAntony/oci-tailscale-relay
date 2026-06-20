@@ -1,0 +1,28 @@
+# OCI basics
+tenancy_ocid        = "ocid1.tenancy.oc1..exampleuniqueID"
+user_ocid           = "ocid1.user.oc1..exampleuniqueID"
+private_key_path    = "~/.oci/oracle_key.pem"
+fingerprint         = "aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99"
+region              = "ap-sydney-1"
+ssh_public_key_path = "~/.ssh/id_ed25519.pub"
+admin_cidr          = "203.0.113.10/32"
+
+# Instance tuning
+instance_name                  = "oci-ts-relay-01"
+hostname_label                 = "ocitsrelay01"
+shape                          = "VM.Standard.A1.Flex"
+shape_is_flex                  = true
+flex_ocpus                     = 4
+flex_memory_gbs                = 24
+flex_boot_volume               = 200
+ansible_ssh_user               = "ubuntu"
+image_ocid                     = null
+image_operating_system         = "Canonical Ubuntu"
+image_operating_system_version = "24.04"
+
+# Peer Relay networking
+relay_source_cidr = "0.0.0.0/0"
+relay_udp_port    = 40000
+
+# Optional budget alert emails (comma-separated)
+budget_alert_recipients = "you@example.com"

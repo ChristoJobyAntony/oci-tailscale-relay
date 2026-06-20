@@ -1,0 +1,140 @@
+---
+- name: Install and configure Tailscale on OCI relay host
+  hosts: oci_relay
+  become: true
+  vars:
+    ts_hostname: "{{ tailscale_hostname | default(inventory_hostname) }}"
+    ts_enable_ssh: "{{ tailscale_enable_ssh | default(true) }}"
+    ts_mode: "{{ tailscale_mode | default('peer-relay') }}"   # valid: peer-relay, exit-node, peer-relay-exit-node, plain
+    ts_relay_udp_port: "{{ relay_udp_port | default(40000) }}"
+    ts_tags: "{{ tailscale_tags | default([]) }}"
+
+  pre_tasks:
+    - name: Wait for cloud-init to finish if present
+      ansible.builtin.command: cloud-init status --wait
+      changed_when: false
+      failed_when: false
+
+  tasks:
+    - name: Install package prerequisites
+      ansible.builtin.package:
+        name:
+          - curl
+          - ca-certificates
+        state: present
+
+    - name: Install Tailscale using the official install script
+      ansible.builtin.shell: curl -fsSL https://tailscale.com/install.sh | sh
+      args:
+        executable: /bin/bash
+      register: tailscale_install
+      changed_when: false
+
+    - name: Enable and start tailscaled
+      ansible.builtin.systemd:
+        name: tailscaled
+        enabled: true
+        state: started
+
+    - name: Check current Tailscale status
+      ansible.builtin.command: tailscale status --json
+      register: tailscale_status
+      changed_when: false
+      failed_when: false
+
+    - name: Derive Tailscale backend state
+      ansible.builtin.set_fact:
+        tailscale_backend_state: "{{ (tailscale_status.stdout | from_json).BackendState | default('') }}"
+      when: tailscale_status.rc == 0
+
+    - name: Join the tailnet for the first time
+      ansible.builtin.command: >-
+        tailscale up
+        --reset
+        --auth-key={{ tailscale_auth_key }}
+        --hostname={{ ts_hostname }}
+        --accept-dns=true
+        --ssh={{ ts_enable_ssh | ternary('true', 'false') }}
+        {% if ts_tags | length > 0 %}--advertise-tags={{ ts_tags | join(',') }}{% endif %}
+      register: tailscale_join
+      failed_when: false
+      no_log: true
+      when: tailscale_status.rc != 0 or tailscale_backend_state | default('') != 'Running'
+
+    - name: Fail with sanitized join error details
+      ansible.builtin.fail:
+        msg: >-
+          tailscale up failed (rc={{ tailscale_join.rc }}).
+          stderr={{ tailscale_join.stderr | default('') | trim | regex_replace('tskey-[A-Za-z0-9_-]+', 'tskey-REDACTED') }}
+          stdout={{ tailscale_join.stdout | default('') | trim | regex_replace('tskey-[A-Za-z0-9_-]+', 'tskey-REDACTED') }}
+      when:
+        - tailscale_join is defined
+        - tailscale_join.rc is defined
+        - tailscale_join.rc != 0
+
+    - name: Apply mutable Tailscale settings
+      ansible.builtin.command: >-
+        tailscale set
+        --hostname={{ ts_hostname }}
+        --ssh={{ ts_enable_ssh | ternary('true', 'false') }}
+      changed_when: false
+
+    - name: Persist IPv4 forwarding for exit-node modes
+      ansible.builtin.lineinfile:
+        path: /etc/sysctl.d/99-tailscale.conf
+        create: true
+        line: 'net.ipv4.ip_forward = 1'
+      when: ts_mode in ['exit-node', 'peer-relay-exit-node']
+
+    - name: Persist IPv6 forwarding for exit-node modes
+      ansible.builtin.lineinfile:
+        path: /etc/sysctl.d/99-tailscale.conf
+        create: true
+        line: 'net.ipv6.conf.all.forwarding = 1'
+      when: ts_mode in ['exit-node', 'peer-relay-exit-node']
+
+    - name: Reload sysctl settings for exit-node modes
+      ansible.builtin.command: sysctl --system
+      changed_when: false
+      when: ts_mode in ['exit-node', 'peer-relay-exit-node']
+
+    - name: Configure Peer Relay mode
+      ansible.builtin.command: >-
+        tailscale set
+        --relay-server-port={{ ts_relay_udp_port }}
+        --advertise-exit-node=false
+      changed_when: false
+      when: ts_mode == 'peer-relay'
+
+    - name: Configure Exit Node mode
+      ansible.builtin.command: >-
+        tailscale set
+        --relay-server-port=
+        --advertise-exit-node
+      changed_when: false
+      when: ts_mode == 'exit-node'
+
+    - name: Configure combined Peer Relay + Exit Node mode
+      ansible.builtin.command: >-
+        tailscale set
+        --relay-server-port={{ ts_relay_udp_port }}
+        --advertise-exit-node
+      changed_when: false
+      when: ts_mode == 'peer-relay-exit-node'
+
+    - name: Configure plain server mode
+      ansible.builtin.command: >-
+        tailscale set
+        --relay-server-port=
+        --advertise-exit-node=false
+      changed_when: false
+      when: ts_mode == 'plain'
+
+    - name: Show final Tailscale status
+      ansible.builtin.command: tailscale status
+      register: tailscale_final_status
+      changed_when: false
+
+    - name: Print final Tailscale status
+      ansible.builtin.debug:
+        var: tailscale_final_status.stdout_lines
