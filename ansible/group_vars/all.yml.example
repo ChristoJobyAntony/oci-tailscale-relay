@@ -10,3 +10,40 @@ relay_udp_port: 40000
 
 tailscale_tags:
   - "tag:peer-relay"
+
+# --- Jellyfin caching reverse proxy (ansible/jellyfin-cache-proxy.yml) ------------
+# Tailnet IP of the Jellyfin host; the node needs an ACL grant to reach it on this port.
+jellyfin_upstream_host: "100.89.210.10"
+jellyfin_upstream_port: 8096
+# Proxy listens on this node's tailnet IPv4 only.
+jellyfin_proxy_listen_port: 8096
+# On-disk cache budget and expiry for media slices; artwork has its own small cache.
+jellyfin_cache_max_size: "130g"
+jellyfin_cache_inactive: "30d"
+# Trust a cached slice this long before revalidating it against the home server (Last-Modified, 304).
+jellyfin_cache_valid: "24h"
+jellyfin_cache_slice: "8m"
+
+# --- Jellyfin cache warmer (installed by ansible/jellyfin-cache-proxy.yml) --------
+# API key created in the Jellyfin dashboard (Dashboard -> API Keys). Leave empty to
+# install the warmer without enabling its timer.
+jellyfin_api_key: ""
+jellyfin_warm_users: ["public", "joshua", "admin"]
+# Intentional pre-warming stops at this much cache; nginx still enforces jellyfin_cache_max_size.
+jellyfin_warm_budget: "100g"
+# Ceiling for cache fills, to protect the home uplink.
+jellyfin_warm_rate_mbit: 30
+# "Recently added" means within this many days.
+jellyfin_warm_recent_days: 14
+# Recent additions and the collection are only warmed inside this local-time window;
+# Continue Watching and Next Up are warmed whenever the timer fires.
+jellyfin_warm_window: "22:00-08:00"
+jellyfin_warm_tz: "Asia/Dubai"
+# Name of a Jellyfin collection whose contents are always warmed.
+jellyfin_warm_collection: "Pre-cache"
+jellyfin_warm_interval: "30min"
+# Per-user list sizes. Continue Watching is sorted by last played, so a small limit keeps
+# the recent items and drops stale half-watched ones.
+jellyfin_warm_resume_limit: 8
+jellyfin_warm_nextup_limit: 10
+jellyfin_warm_latest_limit: 30

@@ -1,0 +1,212 @@
+---
+# Installs nginx on the OCI relay host as a caching reverse proxy in front of the
+# home Jellyfin server. Direct-play media is fetched from the upstream in fixed
+# size slices and kept on local disk, so devices near this node stream from
+# Sydney instead of across the ~400 ms path to the UAE.
+#
+# Requires a tailnet grant that lets this node reach the Jellyfin host on
+# tcp/8096 (tag:prod -> tag:media in the current policy).
+- name: Jellyfin caching reverse proxy on the OCI relay host
+  hosts: oci_relay
+  become: true
+  vars:
+    jf_upstream_host: "{{ jellyfin_upstream_host | default('100.89.210.10') }}"
+    jf_upstream_port: "{{ jellyfin_upstream_port | default(8096) }}"
+    jf_listen_port: "{{ jellyfin_proxy_listen_port | default(8096) }}"
+    jf_cache_dir: "{{ jellyfin_cache_dir | default('/var/cache/nginx/jellyfin') }}"
+    jf_cache_max_size: "{{ jellyfin_cache_max_size | default('120g') }}"
+    jf_cache_inactive: "{{ jellyfin_cache_inactive | default('30d') }}"
+    # How long a cached slice is trusted before nginx revalidates it against
+    # the upstream's Last-Modified (one small 304 round trip per slice).
+    jf_cache_valid: "{{ jellyfin_cache_valid | default('24h') }}"
+    jf_slice_size: "{{ jellyfin_cache_slice | default('8m') }}"
+    jf_site_name: jellyfin-cache-proxy
+
+  handlers:
+    - name: Reload nginx
+      ansible.builtin.systemd:
+        name: nginx
+        state: reloaded
+
+  tasks:
+    - name: Install nginx
+      ansible.builtin.apt:
+        name: nginx
+        state: present
+        update_cache: true
+
+    - name: Read nginx build flags
+      ansible.builtin.command: nginx -V
+      register: nginx_build
+      changed_when: false
+
+    - name: Require the slice module (needed for range-request caching)
+      ansible.builtin.assert:
+        that: "'http_slice_module' in nginx_build.stderr"
+        fail_msg: "This nginx build lacks ngx_http_slice_module; install nginx-full or nginx-extras."
+
+    - name: Determine this node's tailnet IPv4
+      ansible.builtin.command: tailscale ip -4
+      register: tailscale_ipv4
+      changed_when: false
+
+    - name: Set the proxy listen address
+      ansible.builtin.set_fact:
+        jf_listen_ip: "{{ tailscale_ipv4.stdout | trim }}"
+
+    # Lets nginx bind the tailnet IP even if tailscaled has not brought
+    # tailscale0 up yet at boot.
+    - name: Allow binding to a not-yet-assigned local address
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/99-jellyfin-proxy.conf
+        content: "net.ipv4.ip_nonlocal_bind = 1\n"
+        mode: "0644"
+      register: sysctl_file
+
+    - name: Apply sysctl settings
+      ansible.builtin.command: sysctl --system
+      changed_when: false
+      when: sysctl_file.changed
+
+    - name: Create cache directories
+      ansible.builtin.file:
+        path: "{{ jf_cache_dir }}/{{ item }}"
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: "0750"
+      loop:
+        - media
+        - images
+
+    - name: Install shared proxy header snippet
+      ansible.builtin.template:
+        src: templates/jellyfin-proxy-headers.conf.j2
+        dest: /etc/nginx/snippets/jellyfin-proxy-headers.conf
+        mode: "0644"
+      notify: Reload nginx
+
+    - name: Install the proxy site
+      ansible.builtin.template:
+        src: templates/jellyfin-cache-proxy.conf.j2
+        dest: "/etc/nginx/sites-available/{{ jf_site_name }}"
+        mode: "0644"
+      notify: Reload nginx
+
+    - name: Enable the proxy site
+      ansible.builtin.file:
+        src: "/etc/nginx/sites-available/{{ jf_site_name }}"
+        dest: "/etc/nginx/sites-enabled/{{ jf_site_name }}"
+        state: link
+      notify: Reload nginx
+
+    - name: Remove the stock default site (would listen on 0.0.0.0:80)
+      ansible.builtin.file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify: Reload nginx
+
+    - name: Create the nginx systemd drop-in directory
+      ansible.builtin.file:
+        path: /etc/systemd/system/nginx.service.d
+        state: directory
+        mode: "0755"
+
+    - name: Start nginx after tailscaled and restart it on failure
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/nginx.service.d/override.conf
+        content: |
+          [Unit]
+          After=tailscaled.service
+
+          [Service]
+          Restart=on-failure
+          RestartSec=5s
+        mode: "0644"
+      register: nginx_dropin
+
+    - name: Reload systemd units
+      ansible.builtin.systemd:
+        daemon_reload: true
+      when: nginx_dropin.changed
+
+    - name: Validate the full nginx configuration
+      ansible.builtin.command: nginx -t
+      changed_when: false
+
+    - name: Enable and start nginx
+      ansible.builtin.systemd:
+        name: nginx
+        enabled: true
+        state: started
+
+    - name: Flush handlers so a reload happens before the smoke test
+      ansible.builtin.meta: flush_handlers
+
+    - name: Smoke test through the proxy to the upstream Jellyfin
+      ansible.builtin.uri:
+        url: "http://{{ jf_listen_ip }}:{{ jf_listen_port }}/System/Info/Public"
+        return_content: true
+        status_code: 200
+      register: jf_smoke
+      retries: 3
+      delay: 3
+      until: jf_smoke.status == 200
+
+    - name: Show the upstream Jellyfin version seen through the proxy
+      ansible.builtin.debug:
+        msg: "Proxy at http://{{ jf_listen_ip }}:{{ jf_listen_port }} -> Jellyfin {{ jf_smoke.json.Version }} ({{ jf_smoke.json.ServerName }})"
+
+    # ------------------------------------------------------------ cache warmer
+    # Pre-fetches what the configured Jellyfin users are likely to watch next
+    # (Continue Watching, a "Pre-cache" collection, Next Up, recent additions)
+    # by requesting it through the proxy, so nginx stores the slices ahead of
+    # playback. Needs jellyfin_api_key in group_vars; without it the units are
+    # installed but the timer stays off.
+    - name: Install the cache warmer script
+      ansible.builtin.copy:
+        src: files/jellyfin-cache-warmer.py
+        dest: /usr/local/bin/jellyfin-cache-warmer.py
+        mode: "0755"
+
+    - name: Install the warmer service and timer units
+      ansible.builtin.template:
+        src: "templates/{{ item }}.j2"
+        dest: "/etc/systemd/system/{{ item }}"
+        mode: "0644"
+      loop:
+        - jellyfin-cache-warmer.service
+        - jellyfin-cache-warmer.timer
+      register: warmer_units
+
+    - name: Reload systemd after warmer unit changes
+      ansible.builtin.systemd:
+        daemon_reload: true
+      when: warmer_units.changed
+
+    - name: Note when the warmer has no API key
+      ansible.builtin.debug:
+        msg: "jellyfin_api_key is not set; the cache warmer is installed but its timer stays disabled."
+      when: jellyfin_api_key is not defined or jellyfin_api_key | length == 0
+
+    - name: Install the warmer environment (holds the Jellyfin API key)
+      ansible.builtin.template:
+        src: templates/jellyfin-cache-warmer.env.j2
+        dest: /etc/jellyfin-cache-warmer.env
+        owner: root
+        group: www-data
+        mode: "0640"
+      no_log: true
+      when: jellyfin_api_key is defined and jellyfin_api_key | length > 0
+
+    - name: Enable the warmer timer
+      ansible.builtin.systemd:
+        name: jellyfin-cache-warmer.timer
+        enabled: true
+        state: started
+      when: jellyfin_api_key is defined and jellyfin_api_key | length > 0
+
+    - name: Start a warmer run now without waiting for it
+      ansible.builtin.command: systemctl start --no-block jellyfin-cache-warmer.service
+      changed_when: false
+      when: jellyfin_api_key is defined and jellyfin_api_key | length > 0

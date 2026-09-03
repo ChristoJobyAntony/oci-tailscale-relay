@@ -1,0 +1,19 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Pre-warm the nginx Jellyfin media cache
+After=network-online.target nginx.service tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=www-data
+Group=www-data
+EnvironmentFile=/etc/jellyfin-cache-warmer.env
+ExecStart=/usr/bin/python3 /usr/local/bin/jellyfin-cache-warmer.py
+Nice=10
+TimeoutStartSec=45min
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths={{ jf_cache_dir }}

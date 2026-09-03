@@ -112,6 +112,27 @@ tailscale status | grep peer-relay
 
 The node also hosts the public NeoAuth deployment. Its infrastructure (Cloudflare Tunnel Terraform and node-preparation Ansible) lives in the sibling `neoauth-infra` repo; this repo's only involvement is advertising the node tags (`tailscale_tags` in `ansible/group_vars/all.yml`, including the `tag:prod` deploy-target tag that NeoAuth's CI targets).
 
+### Jellyfin caching reverse proxy
+
+`ansible/jellyfin-cache-proxy.yml` installs nginx on the node as a caching reverse proxy in front of the home Jellyfin server. It listens on the node's tailnet IPv4 on port 8096 (never on the public interface) and caches direct-play media streams (`Static=true`) in 8 MB slices, plus artwork, so devices near the node stream from local disk instead of across the ~400 ms path to the home server. Transcoded HLS sessions, the API and the websocket pass straight through uncached.
+
+Requirements:
+
+- A tailnet grant that lets this node (`tag:prod`) reach the Jellyfin host (`tag:media`) on `tcp:8096`.
+- `jellyfin_upstream_host` in `ansible/group_vars/all.yml` set to the tailnet IP of the Jellyfin host (see the example file for all tunables).
+
+```bash
+ansible-playbook -i ansible/inventory.ini ansible/jellyfin-cache-proxy.yml
+```
+
+Cache entries are keyed on the item and media source only, not on the client's `Tag` parameter, so the Jellyfin web app, Kodi and the mobile apps all share one copy and one pre-warmed file is a hit for every client. Freshness comes from revalidation: once a slice is older than `jellyfin_cache_valid` (24h), the next request for it makes nginx ask the home server whether the file changed since its `Last-Modified`; Jellyfin answers 304 in one round trip (about 0.2 s) and the slice is served and trusted for another day. Do not enable `proxy_cache_background_update` on the media location: combined with the slice module it re-downloads the whole file per slice.
+
+Point clients at `http://oci-ts-relay-01:8096/`. Each cached response carries an `X-Cache-Status` header, and `/var/log/nginx/jellyfin-cache.access.log` on the node records HIT/MISS per request. Cached slices are served without re-checking the Jellyfin token, so keep the ACL for this port scoped to your own devices.
+
+A companion cache warmer runs from a systemd timer on the node every 30 minutes. It asks Jellyfin what the users listed in `jellyfin_warm_users` are likely to watch next, in priority order: Continue Watching, anything in a collection named `Pre-cache`, Next Up, then titles added in the last 14 days and requests those files through the proxy in slice-aligned ranges, so nginx pulls them from the home server ahead of playback. Fills are paced to `jellyfin_warm_rate_mbit`, capped at `jellyfin_warm_budget`, and recent additions are only fetched inside the `jellyfin_warm_window` local-time window. It needs `jellyfin_api_key` in `ansible/group_vars/all.yml` (Jellyfin Dashboard, API Keys). Progress is in `journalctl -u jellyfin-cache-warmer`. To see what it would fetch without touching the cache, run it on the node with `--dry-run` under the same environment file: `sudo bash -c 'set -a; . /etc/jellyfin-cache-warmer.env; runuser -u www-data -- python3 /usr/local/bin/jellyfin-cache-warmer.py --dry-run'`. Collection members are expanded explicitly (a Season or Series becomes its episodes), because Jellyfin's own recursive query on a collection does not descend into Seasons.
+
+The inventory may point at the node's tailnet IP instead of the public IP; with Tailscale SSH enabled that avoids depending on `admin_cidr`.
+
 ## Security recommendations
 
 - Keep `admin_cidr` as narrow as possible instead of `0.0.0.0/0`.
