@@ -108,6 +108,10 @@ tailscale status | grep peer-relay
 - After Ansible runs, go to the Tailscale admin console and approve the node as an exit node.
 - Ensure your tailnet policy grants clients access to `autogroup:internet`.
 
+## Workloads on this node
+
+The node also hosts the public NeoAuth deployment. Its infrastructure (Cloudflare Tunnel Terraform and node-preparation Ansible) lives in the sibling `neoauth-infra` repo; this repo's only involvement is advertising the node tags (`tailscale_tags` in `ansible/group_vars/all.yml`, including the `tag:prod` deploy-target tag that NeoAuth's CI targets).
+
 ## Security recommendations
 
 - Keep `admin_cidr` as narrow as possible instead of `0.0.0.0/0`.

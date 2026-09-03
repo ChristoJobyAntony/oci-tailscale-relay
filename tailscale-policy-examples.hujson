@@ -26,6 +26,9 @@
   ]
 }
 
+// Policy snippets for CI deploys to workloads on this node (tag:ci / tag:prod)
+// live in the sibling neoauth-infra repo's README.
+
 {
   // Example for an Exit Node
   "tagOwners": {
