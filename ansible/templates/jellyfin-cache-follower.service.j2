@@ -1,0 +1,23 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Prefetch Jellyfin titles being watched through the cache proxy
+After=network-online.target nginx.service tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+EnvironmentFile=/etc/jellyfin-cache-warmer.env
+ExecStart=/usr/bin/python3 /usr/local/bin/jellyfin-cache-warmer.py --follow
+Restart=always
+RestartSec=10s
+Nice=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths={{ jf_cache_dir }}
+
+[Install]
+WantedBy=multi-user.target

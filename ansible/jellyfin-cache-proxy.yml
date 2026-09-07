@@ -28,6 +28,21 @@
         name: nginx
         state: reloaded
 
+    # Needed when the systemd drop-in changes: resource limits only apply to a
+    # freshly started master process, a reload keeps the old one.
+    - name: Restart nginx
+      ansible.builtin.systemd:
+        name: nginx
+        state: restarted
+        daemon_reload: true
+
+    - name: Restart the cache follower
+      ansible.builtin.systemd:
+        name: jellyfin-cache-follower.service
+        state: restarted
+        daemon_reload: true
+      when: jellyfin_api_key is defined and jellyfin_api_key | length > 0
+
   tasks:
     - name: Install nginx
       ansible.builtin.apt:
@@ -112,7 +127,7 @@
         state: directory
         mode: "0755"
 
-    - name: Start nginx after tailscaled and restart it on failure
+    - name: Start nginx after tailscaled, restart it on failure, allow many open files
       ansible.builtin.copy:
         dest: /etc/systemd/system/nginx.service.d/override.conf
         content: |
@@ -122,8 +137,12 @@
           [Service]
           Restart=on-failure
           RestartSec=5s
+          # A slice cache opens one file per 8 MB slice in flight; the stock
+          # soft limit of 1024 was exhausted by a single open-ended request.
+          LimitNOFILE=65536
         mode: "0644"
       register: nginx_dropin
+      notify: Restart nginx
 
     - name: Reload systemd units
       ansible.builtin.systemd:
@@ -168,8 +187,9 @@
         src: files/jellyfin-cache-warmer.py
         dest: /usr/local/bin/jellyfin-cache-warmer.py
         mode: "0755"
+      notify: Restart the cache follower
 
-    - name: Install the warmer service and timer units
+    - name: Install the warmer service, timer and follower units
       ansible.builtin.template:
         src: "templates/{{ item }}.j2"
         dest: "/etc/systemd/system/{{ item }}"
@@ -177,7 +197,9 @@
       loop:
         - jellyfin-cache-warmer.service
         - jellyfin-cache-warmer.timer
+        - jellyfin-cache-follower.service
       register: warmer_units
+      notify: Restart the cache follower
 
     - name: Reload systemd after warmer unit changes
       ansible.builtin.systemd:
@@ -197,11 +219,21 @@
         group: www-data
         mode: "0640"
       no_log: true
+      notify: Restart the cache follower
       when: jellyfin_api_key is defined and jellyfin_api_key | length > 0
 
     - name: Enable the warmer timer
       ansible.builtin.systemd:
         name: jellyfin-cache-warmer.timer
+        enabled: true
+        state: started
+      when: jellyfin_api_key is defined and jellyfin_api_key | length > 0
+
+    # Long-running: watches active sessions and prefetches what is being played
+    # through the proxy with several parallel streams.
+    - name: Enable and start the cache follower
+      ansible.builtin.systemd:
+        name: jellyfin-cache-follower.service
         enabled: true
         state: started
       when: jellyfin_api_key is defined and jellyfin_api_key | length > 0

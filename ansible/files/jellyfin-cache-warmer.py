@@ -9,16 +9,26 @@ nginx pulls it from the home server and keeps it on local disk.
 Idempotent: slices already cached answer HIT and cost nothing, so the job is
 safe to run often. All configuration comes from the environment; see
 /etc/jellyfin-cache-warmer.env, which Ansible renders from group_vars.
+
+Modes:
+  (default)   one scheduled warming pass (systemd timer)
+  --dry-run   list what a pass would fetch, touch nothing
+  --follow    long-running: watch Jellyfin's active sessions and, when a
+              direct-play title is being watched through the proxy, pull the
+              rest of that file with several parallel streams so playback
+              moves onto the cache within its first minute
 """
 import datetime as dt
 import json
 import os
 import re
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from zoneinfo import ZoneInfo
 
 
@@ -64,7 +74,21 @@ CFG = {
     "resume_limit": int(env("RESUME_LIMIT", "20")),
     "nextup_limit": int(env("NEXTUP_LIMIT", "10")),
     "latest_limit": int(env("LATEST_LIMIT", "30")),
+    # Parallel slice fetches. One stream on a long lossy path is far below
+    # what the path can carry; four streams measured ~3x the throughput.
+    "workers": int(env("WARM_WORKERS", "4")),
+    # --follow mode
+    "follow_interval": float(env("FOLLOW_INTERVAL", "5")),
+    "follow_workers": int(env("FOLLOW_WORKERS", "4")),
+    "follow_rate_mbit": float(env("FOLLOW_RATE_MBIT", "0")),  # 0 = unlimited
+    # Start this many slices ahead of the player's position. The player fetches
+    # the slices it is about to show itself; if the follower grabbed those too,
+    # both would wait on the same in-flight fills at startup.
+    "follow_lead_slices": int(env("FOLLOW_LEAD_SLICES", "3")),
+    "follow_only_proxied": env("FOLLOW_ONLY_PROXIED", "true").lower() in ("1", "true", "yes"),
+    "proxy_ip": env("PROXY_IP", ""),
 }
+PRESENT = ("HIT", "REVALIDATED", "STALE")
 
 AUTH_HEADER = (
     'MediaBrowser Client="jellyfin-cache-warmer", Device="nginx-cache", '
@@ -266,38 +290,162 @@ def in_window(now):
     return current >= start or current < end
 
 
-def warm_item(path, size, deadline, stats):
-    """Probe every slice; pull the ones nginx does not already hold."""
+class Pacer:
+    """Keeps the aggregate fill rate of one job at or below a cap (0 = none)."""
+
+    def __init__(self, rate_mbit):
+        self.rate = rate_mbit * 1e6 / 8  # bytes per second
+        self.lock = threading.Lock()
+        self.started = time.monotonic()
+        self.bytes = 0
+
+    def account(self, n):
+        """Record n filled bytes; return how long the caller should sleep."""
+        with self.lock:
+            self.bytes += n
+            if self.rate <= 0:
+                return 0.0
+            return max(0.0, self.bytes / self.rate - (time.monotonic() - self.started))
+
+
+def warm_item(path, size, deadline, stats, workers=1, pacer=None, start_slice=0):
+    """Probe every slice; pull the ones nginx does not already hold.
+
+    Slices are visited from start_slice to the end, then from the beginning up
+    to start_slice, so a follower prefetches ahead of the player first. Several
+    slices are in flight at once when workers > 1.
+    """
     slice_size = CFG["slice"]
     slices = (size + slice_size - 1) // slice_size
-    min_seconds_per_fill = slice_size * 8 / (CFG["rate_mbit"] * 1e6)
-    filled = hits = 0
-    for index in range(slices):
+    start_slice = max(0, min(start_slice, slices - 1)) if slices else 0
+    order = list(range(start_slice, slices)) + list(range(0, start_slice))
+    counts = {"filled": 0, "hits": 0}
+    outcome = ["ok"]
+    lock = threading.Lock()
+    stop = threading.Event()
+
+    def one(index):
+        if stop.is_set():
+            return
         if time.monotonic() > deadline:
-            return filled, hits, slices, "time budget exhausted"
+            outcome[0] = "time budget exhausted"
+            stop.set()
+            return
         start = index * slice_size
         end = min(start + slice_size, size) - 1
-        began = time.monotonic()
-        status, cache, _total = fetch_range(path, start, start, read_body=False)
-        if status != 206:
-            return filled, hits, slices, f"upstream ignored Range (HTTP {status})"
-        if cache in ("HIT", "REVALIDATED", "STALE"):
-            hits += 1
+        try:
+            status, cache, _total = fetch_range(path, start, start, read_body=False)
+            if status != 206:
+                outcome[0] = f"upstream ignored Range (HTTP {status})"
+                stop.set()
+                return
+            if cache in PRESENT:
+                with lock:
+                    counts["hits"] += 1
+                return
+            # Not cached yet: read the whole slice so nginx completes and stores it.
+            fetch_range(path, start, end, read_body=True)
+            with lock:
+                counts["filled"] += 1
+                stats["bytes"] += end - start + 1
+            if pacer is not None:
+                delay = pacer.account(end - start + 1)
+                if delay > 0:
+                    time.sleep(delay)
+        except (urllib.error.URLError, OSError) as exc:
+            outcome[0] = str(exc)
+            stop.set()
+
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        list(pool.map(one, order))
+    return counts["filled"], counts["hits"], slices, outcome[0]
+
+
+# ------------------------------------------------------------------ follower
+
+def follow_item(item, media_source_id, position_ticks, runtime_ticks, who):
+    """Pull the rest of a title someone is watching, ahead of their position."""
+    label = item_label(item)
+    path = stream_path(item, {"Id": media_source_id, "Container": item.get("Container") or ""})
+    try:
+        status, _cache, size = fetch_range(path, 0, 0, read_body=False)
+    except (urllib.error.URLError, OSError) as exc:
+        log(f"follow WARN  {label}: probe failed: {exc}")
+        return
+    if status != 206 or not size:
+        log(f"follow WARN  {label}: proxy did not return a ranged response (HTTP {status})")
+        return
+    start_slice = 0
+    if runtime_ticks and position_ticks:
+        start_slice = int(min(position_ticks / runtime_ticks, 1.0) * size) // CFG["slice"]
+    start_slice += CFG["follow_lead_slices"]  # the wrap-around pass fills what was skipped
+    stats = {"bytes": 0}
+    began = time.monotonic()
+    log(f"follow start {label} for {who}: {fmt_bytes(size)}, from slice {start_slice}, "
+        f"{CFG['follow_workers']} workers")
+    pacer = Pacer(CFG["follow_rate_mbit"]) if CFG["follow_rate_mbit"] > 0 else None
+    filled, hits, slices, outcome = warm_item(path, size, time.monotonic() + 6 * 3600, stats,
+                                              workers=CFG["follow_workers"], pacer=pacer,
+                                              start_slice=start_slice)
+    elapsed = time.monotonic() - began
+    rate = stats["bytes"] * 8 / elapsed / 1e6 if elapsed > 0 else 0.0
+    log(f"follow done  {label}: {outcome}; slices={slices} filled={filled} hit={hits} "
+        f"pulled={fmt_bytes(stats['bytes'])} in {elapsed:.0f}s ({rate:.1f} Mbit/s)")
+
+
+def follow():
+    """Poll Jellyfin's sessions; prefetch direct-play titles being watched via the proxy."""
+    active = {}
+    finished = {}
+    log(f"follower started: interval={CFG['follow_interval']}s workers={CFG['follow_workers']} "
+        f"only_proxied={CFG['follow_only_proxied']} proxy_ip={CFG['proxy_ip'] or '-'}")
+    while True:
+        try:
+            sessions = api("/Sessions", {"activeWithinSeconds": 120})
+        except (urllib.error.URLError, json.JSONDecodeError, OSError) as exc:
+            log(f"follow WARN  sessions query failed: {exc}")
+            time.sleep(CFG["follow_interval"])
             continue
-        # Not cached yet: read the whole slice so nginx completes and stores it.
-        fetch_range(path, start, end, read_body=True)
-        filled += 1
-        stats["bytes"] += end - start + 1
-        elapsed = time.monotonic() - began
-        if elapsed < min_seconds_per_fill:
-            time.sleep(min_seconds_per_fill - elapsed)
-    return filled, hits, slices, "ok"
+        for session in sessions:
+            item = session.get("NowPlayingItem")
+            state = session.get("PlayState") or {}
+            if not item or item.get("Type") not in ("Movie", "Episode"):
+                continue
+            if state.get("PlayMethod") != "DirectPlay":
+                continue  # transcodes and remuxes are per-session and never cached
+            if CFG["follow_only_proxied"] and CFG["proxy_ip"] \
+                    and session.get("RemoteEndPoint") != CFG["proxy_ip"]:
+                continue  # this player is not coming through the proxy
+            iid = item["Id"]
+            thread = active.get(iid)
+            if thread is not None:
+                if thread.is_alive():
+                    continue
+                finished[iid] = time.monotonic()  # ended since the last sweep
+                del active[iid]
+            if iid in finished and time.monotonic() - finished[iid] < 1800:
+                continue
+            who = f"{session.get('UserName') or '?'}@{session.get('DeviceName') or session.get('Client') or '?'}"
+            thread = threading.Thread(
+                target=follow_item, daemon=True, name=f"follow-{iid[:8]}",
+                args=(item, state.get("MediaSourceId") or iid, state.get("PositionTicks") or 0,
+                      item.get("RunTimeTicks") or 0, who))
+            active[iid] = thread
+            thread.start()
+        for iid, thread in list(active.items()):
+            if not thread.is_alive():
+                finished[iid] = time.monotonic()
+                del active[iid]
+        time.sleep(CFG["follow_interval"])
 
 
 def main():
     if not CFG["api_key"]:
         log("ERROR JELLYFIN_API_KEY is not set")
         return 2
+    if "--follow" in sys.argv[1:]:
+        follow()  # runs until the service is stopped
+        return 0
     started = time.monotonic()
     deadline = started + CFG["max_run"]
     now = dt.datetime.now(ZoneInfo(CFG["tz"]))
@@ -315,7 +463,8 @@ def main():
     stats = {"bytes": 0, "items_filled": 0, "items_cached": 0, "skipped_window": 0,
              "skipped_budget": 0, "errors": 0, "slices_filled": 0, "slices_hit": 0}
     log(f"start users={list(user_ids)} candidates={len(picks)} window_open={window_open} "
-        f"local_time={now:%Y-%m-%d %H:%M %Z} cache_used={fmt_bytes(used)} budget={fmt_bytes(CFG['budget'])}")
+        f"local_time={now:%Y-%m-%d %H:%M %Z} cache_used={fmt_bytes(used)} budget={fmt_bytes(CFG['budget'])} "
+        f"workers={CFG['workers']} rate_cap={CFG['rate_mbit']:g} Mbit/s")
 
     if "--dry-run" in sys.argv[1:]:
         # List what would be warmed, in order, without touching the cache.
@@ -356,7 +505,8 @@ def main():
                 log(f"skip {source_name:10s} {label}: {fmt_bytes(size)} would exceed the warm budget")
                 stats["skipped_budget"] += 1
                 continue
-            filled, hits, slices, outcome = warm_item(path, size, deadline, stats)
+            filled, hits, slices, outcome = warm_item(path, size, deadline, stats,
+                                                      workers=CFG["workers"], pacer=Pacer(CFG["rate_mbit"]))
         except (urllib.error.URLError, json.JSONDecodeError, OSError) as exc:
             log(f"WARN {source_name:10s} {label}: {exc}")
             stats["errors"] += 1

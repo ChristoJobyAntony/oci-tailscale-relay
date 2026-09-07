@@ -54,6 +54,15 @@ server {
         # Finish and store an in-flight slice even if the player seeks away.
         proxy_ignore_client_abort on;
 
+        # With sendfile, the slice module hands cached slices to the socket as
+        # in-file buffers and keeps opening the next ones without waiting for
+        # the client to drain: an open-ended "Range: bytes=0-" on a cached 10 GB
+        # file opened 1000+ cache files within two seconds and hit EMFILE,
+        # breaking playback on Kodi. Copying through bounded memory buffers
+        # makes the slice chain advance only as fast as the client reads.
+        sendfile off;
+        output_buffers 4 1m;
+
         # The key deliberately excludes the client's Tag (ETag) parameter: the
         # web client sends it, Kodi does not, and including it would split the
         # cache per client. Freshness comes from revalidation instead: once a

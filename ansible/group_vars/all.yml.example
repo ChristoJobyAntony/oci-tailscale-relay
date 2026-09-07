@@ -30,7 +30,7 @@ jellyfin_cache_slice: "8m"
 jellyfin_api_key: ""
 jellyfin_warm_users: ["public", "joshua", "admin"]
 # Intentional pre-warming stops at this much cache; nginx still enforces jellyfin_cache_max_size.
-jellyfin_warm_budget: "100g"
+jellyfin_warm_budget: "115g"
 # Ceiling for cache fills, to protect the home uplink.
 jellyfin_warm_rate_mbit: 30
 # "Recently added" means within this many days.
@@ -47,3 +47,16 @@ jellyfin_warm_interval: "30min"
 jellyfin_warm_resume_limit: 8
 jellyfin_warm_nextup_limit: 10
 jellyfin_warm_latest_limit: 30
+# Parallel slice fetches per title. One stream on the long lossy path to the UAE managed
+# ~25 Mbit/s where four managed ~74; the rate cap above still applies to the aggregate.
+jellyfin_warm_workers: 4
+# Session follower (jellyfin-cache-follower.service): when a direct-play title is being
+# watched through the proxy, pull the rest of it ahead of the player. No rate cap by
+# default (0) because it is racing a live playback; set only_proxied to false if Known
+# Proxies is configured in Jellyfin (RemoteEndPoint then shows the real client IP).
+jellyfin_follow_interval: 5
+jellyfin_follow_workers: 4
+jellyfin_follow_rate_mbit: 0
+# Start this many 8 MB slices ahead of the player so the two never wait on the same fills.
+jellyfin_follow_lead_slices: 3
+jellyfin_follow_only_proxied: true
