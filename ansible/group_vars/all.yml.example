@@ -4,6 +4,8 @@
 tailscale_auth_key: "tskey-auth-REPLACE_ME"
 tailscale_hostname: "oci-ts-relay-01"
 tailscale_enable_ssh: true
+# Let tailscaled upgrade itself from the Tailscale apt repo (unattended-upgrades does not cover it).
+tailscale_auto_update: true
 
 tailscale_mode: "peer-relay"   # peer-relay | exit-node | peer-relay-exit-node | plain
 relay_udp_port: 40000

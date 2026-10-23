@@ -5,6 +5,9 @@
   vars:
     ts_hostname: "{{ tailscale_hostname | default(inventory_hostname) }}"
     ts_enable_ssh: "{{ tailscale_enable_ssh | default(true) }}"
+    # The Tailscale apt repo is outside unattended-upgrades' allowed origins,
+    # so without this the client never moves past the version Ansible installed.
+    ts_auto_update: "{{ tailscale_auto_update | default(true) }}"
     ts_mode: "{{ tailscale_mode | default('peer-relay') }}"   # valid: peer-relay, exit-node, peer-relay-exit-node, plain
     ts_relay_udp_port: "{{ relay_udp_port | default(40000) }}"
     ts_tags: "{{ tailscale_tags | default([]) }}"
@@ -22,6 +25,21 @@
           - curl
           - ca-certificates
         state: present
+
+    - name: Gather service facts
+      ansible.builtin.service_facts:
+
+    # Ubuntu cloud images ship nfs-common, whose rpcbind listens on 0.0.0.0:111
+    # (including the tailnet interface). Nothing on this node uses NFS.
+    - name: Disable the unused rpcbind portmapper
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: false
+        state: stopped
+      loop:
+        - rpcbind.socket
+        - rpcbind.service
+      when: "'rpcbind.service' in ansible_facts.services"
 
     - name: Install Tailscale using the official install script
       ansible.builtin.shell: curl -fsSL https://tailscale.com/install.sh | sh
@@ -77,6 +95,7 @@
         tailscale set
         --hostname={{ ts_hostname }}
         --ssh={{ ts_enable_ssh | ternary('true', 'false') }}
+        --auto-update={{ ts_auto_update | ternary('true', 'false') }}
       changed_when: false
 
     - name: Persist IPv4 forwarding for exit-node modes
