@@ -151,6 +151,10 @@ resource "oci_core_instance" "relay" {
   shape               = var.shape
   freeform_tags       = merge(local.common_tags, { Role = "tailscale-relay" })
 
+  # When the Always Free guardrails are enabled, let the quota policy settle
+  # before the launch is checked against it.
+  depends_on = [oci_limits_quota.free_tier]
+
   lifecycle {
     replace_triggered_by = [terraform_data.relay_launch_triggers]
   }

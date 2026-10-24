@@ -1,4 +1,10 @@
 .terraform/*
-terraform.tfvars
+# Deployment-specific variable files (terraform.tfvars = Sydney, india.tfvars = Hyderabad);
+# the *.tfvars.example files stay tracked.
+*.tfvars
+# Local state for the default workspace and for named workspaces (terraform.tfstate.d/).
 *.tfstate
+*.tfstate.*
+terraform.tfstate.d/
+*.tfplan
 .DS_Store

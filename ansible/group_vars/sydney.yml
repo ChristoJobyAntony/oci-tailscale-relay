@@ -1,0 +1,8 @@
+# Per-node settings for the Sydney relay (Terraform default workspace, ap-sydney-1).
+# Secrets and settings shared by every relay live in group_vars/all.yml.
+# The Tailscale hostname is the inventory name (oci-ts-relay-01).
+
+tailscale_mode: "peer-relay-exit-node"   # peer-relay | exit-node | peer-relay-exit-node | plain
+
+# tag:exitnodes = exit-node role, tag:prod = NeoAuth CI deploy target (SSH from tag:ci).
+tailscale_tags: ["tag:exitnodes", "tag:prod"]

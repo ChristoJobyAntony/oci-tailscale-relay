@@ -1,2 +1,12 @@
-[oci_relay]
+# One group per deployment (= one Terraform workspace). Both playbooks target the
+# parent group `relays`; add --limit <group> to touch a single node.
+# Each host's inventory name becomes its Tailscale hostname.
+[relays:children]
+sydney
+india
+
+[sydney]
 oci-ts-relay-01 ansible_host=203.0.113.20 ansible_user=ubuntu
+
+[india]
+oci-ts-relay-02 ansible_host=203.0.113.21 ansible_user=ubuntu

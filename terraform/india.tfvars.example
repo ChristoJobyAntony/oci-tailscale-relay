@@ -1,0 +1,46 @@
+# Copy to india.tfvars. Second deployment: Hyderabad relay in a separate OCI tenancy.
+# Authenticates through the [india] profile in ~/.oci/config. Apply with:
+#   TF_WORKSPACE=india terraform apply -var-file=india.tfvars
+#
+# Terraform always auto-loads terraform.tfvars (Sydney) before this file, so the
+# Sydney API credentials are explicitly nulled here; the profile supplies them.
+config_file_profile = "india"
+user_ocid           = null
+fingerprint         = null
+private_key_path    = null
+tenancy_ocid        = "ocid1.tenancy.oc1..exampleuniqueID"
+region              = "ap-hyderabad-1"
+
+ssh_public_key_path = "~/.ssh/id_ed25519.pub"
+# Your workstation's public IP. Only the bootstrap SSH uses it; afterwards
+# Ansible reaches the node over Tailscale SSH.
+admin_cidr = "203.0.113.10/32"
+
+# Instance tuning: the Always Free A1 allowance since June 2026 (2 OCPU, 12 GB).
+instance_name    = "oci-ts-relay-02"
+hostname_label   = "ocitsrelay02"
+shape            = "VM.Standard.A1.Flex"
+shape_is_flex    = true
+flex_ocpus       = 2
+flex_memory_gbs  = 12
+flex_boot_volume = 100
+ansible_ssh_user = "ubuntu"
+# Pinned on purpose: the launch triggers include the image, so a null value would
+# replace the instance whenever Canonical publishes a newer 24.04 aarch64 image.
+image_ocid = "ocid1.image.oc1.ap-hyderabad-1.exampleuniqueID" # pin the newest Canonical-Ubuntu-24.04-aarch64 image in the region
+
+# Distinct from Sydney's 10.42.0.0/16 so the two VCNs could be routed together later.
+vcn_cidr           = "10.43.0.0/16"
+public_subnet_cidr = "10.43.10.0/24"
+
+# Peer Relay networking
+relay_source_cidr = "0.0.0.0/0"
+relay_udp_port    = 40000
+
+# Stanza header for the ansible_inventory output.
+ansible_inventory_group = "india"
+
+# Always Free guardrails (guardrails.tf): tenancy-wide quota policy + budget.
+enable_free_tier_guardrails = true
+tenancy_budget_amount       = 1
+budget_alert_recipients     = "you@example.com"

@@ -20,7 +20,7 @@ output "ssh_user" {
 
 output "ansible_inventory" {
   value = <<-EOT
-[oci_relay]
+[${var.ansible_inventory_group}]
 ${oci_core_instance.relay.display_name} ansible_host=${oci_core_instance.relay.public_ip} ansible_user=${var.ansible_ssh_user}
 EOT
 }

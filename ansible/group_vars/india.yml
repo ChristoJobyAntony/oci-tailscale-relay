@@ -1,0 +1,8 @@
+# Per-node settings for the Hyderabad relay (Terraform workspace "india", ap-hyderabad-1).
+# Secrets and settings shared by every relay live in group_vars/all.yml.
+# The Tailscale hostname is the inventory name (oci-ts-relay-02).
+
+tailscale_mode: "peer-relay-exit-node"   # peer-relay | exit-node | peer-relay-exit-node | plain
+
+# Exit-node role only. tag:prod is the NeoAuth CI deploy target and stays on Sydney.
+tailscale_tags: ["tag:exitnodes"]

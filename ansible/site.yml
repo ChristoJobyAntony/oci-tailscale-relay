@@ -1,6 +1,6 @@
 ---
-- name: Install and configure Tailscale on OCI relay host
-  hosts: oci_relay
+- name: Install and configure Tailscale on the relay hosts
+  hosts: relays
   become: true
   vars:
     ts_hostname: "{{ tailscale_hostname | default(inventory_hostname) }}"

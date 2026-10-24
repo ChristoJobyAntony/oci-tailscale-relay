@@ -2,13 +2,11 @@
 # Consider using Ansible Vault for this file.
 
 tailscale_auth_key: "tskey-auth-REPLACE_ME"
-tailscale_hostname: "oci-ts-relay-01"
 tailscale_enable_ssh: true
 # Let tailscaled upgrade itself from the Tailscale apt repo (unattended-upgrades does not cover it).
 tailscale_auto_update: true
 
-tailscale_mode: "peer-relay"   # peer-relay | exit-node | peer-relay-exit-node | plain
 relay_udp_port: 40000
 
-tailscale_tags:
-  - "tag:peer-relay"
+# Per-node settings (tailscale_mode, tailscale_tags) live in group_vars/<group>.yml;
+# the Tailscale hostname is the inventory name.

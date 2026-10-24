@@ -197,3 +197,70 @@ variable "budget_alert_recipients" {
   type        = string
   default     = null
 }
+
+variable "config_file_profile" {
+  description = "Optional profile name in ~/.oci/config to authenticate with. When set, user_ocid, fingerprint, private_key_path and region can stay null and are read from that profile."
+  type        = string
+  default     = null
+}
+
+variable "ansible_inventory_group" {
+  description = "Inventory group name written by the ansible_inventory output. Give each deployment (Terraform workspace) its own group so ansible/inventory.ini can hold several relays under the parent group `relays`."
+  type        = string
+  default     = "oci_relay"
+
+  validation {
+    condition     = can(regex("^[A-Za-z_][A-Za-z0-9_]*$", var.ansible_inventory_group))
+    error_message = "ansible_inventory_group must be a valid Ansible group name (letters, digits, underscores)."
+  }
+}
+
+# --- Always Free guardrails (guardrails.tf) -----------------------------------
+
+variable "enable_free_tier_guardrails" {
+  description = "Create a tenancy-wide quota policy and budget that pin the account to OCI's Always Free allowances. Use on accounts that must never be billed."
+  type        = bool
+  default     = false
+}
+
+variable "free_tier_a1_ocpus" {
+  description = "Quota cap for VM.Standard.A1.Flex OCPUs across the tenancy. Oracle's Always Free allowance is 1,500 OCPU-hours a month, i.e. 2 OCPUs always on (it was 4 before June 2026)."
+  type        = number
+  default     = 2
+}
+
+variable "free_tier_a1_memory_gbs" {
+  description = "Quota cap for VM.Standard.A1.Flex memory in GB across the tenancy. Always Free is 9,000 GB-hours a month, i.e. 12 GB always on (24 before June 2026)."
+  type        = number
+  default     = 12
+}
+
+variable "free_tier_micro_instances" {
+  description = "Quota cap for VM.Standard.E2.1.Micro instances (and their OCPUs). Always Free allows 2."
+  type        = number
+  default     = 2
+}
+
+variable "free_tier_block_storage_gb" {
+  description = "Quota cap for boot plus block volume storage in GB per availability domain. Always Free is 200 GB combined."
+  type        = number
+  default     = 200
+}
+
+variable "free_tier_object_storage_gb" {
+  description = "Quota cap for Object Storage in GB. Always Free on a paid account is 10 GB Standard plus 10 GB Infrequent Access plus 10 GB Archive; 10 keeps any single tier inside its allowance."
+  type        = number
+  default     = 10
+}
+
+variable "free_tier_extra_quota_statements" {
+  description = "Additional quota statements appended to the Always Free policy, for example zeroing further service families."
+  type        = list(string)
+  default     = []
+}
+
+variable "tenancy_budget_amount" {
+  description = "Monthly amount in the tenancy's currency for the whole-tenancy budget created by the guardrails."
+  type        = number
+  default     = 1
+}
